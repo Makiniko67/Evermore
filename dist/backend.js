@@ -1,4 +1,4 @@
-// Evermore 0.3.1 — Lumiverse Spindle backend
+// Evermore 0.3.2 — Lumiverse Spindle backend
 // Per-chat story archive, explicit connection routing, and rich-note image uploads.
 
 const PREFIX = "evermore/chats/";
@@ -55,15 +55,36 @@ async function capture(chatId, message) {
 // sees messages sent after Evermore was installed, which is not enough for a
 // reliable first scene record in an older conversation.
 async function syncChatMessages(chatId, archive) {
-  if (!spindle.chat?.getMessages) {
-    throw new Error("This Lumiverse installation does not expose chat history reading. Please update Evermore and approve its chat history permission.");
+  if (!spindle.chat || typeof spindle.chat.getMessages !== "function") {
+    if (archive.messages.length) return archive.messages;
+    throw new Error("This Lumiverse version does not expose chat history reading. Check that the chat_mutation permission is granted, then reload Evermore.");
   }
-  const source = await spindle.chat.getMessages(chatId);
-  if (!Array.isArray(source)) throw new Error("Lumiverse did not return a readable message list for this chat.");
-  archive.messages = source
-    .filter(m => m && typeof (m.content ?? m.text ?? m.mes) === "string")
+  let source;
+  try {
+    // `tail` keeps the request bounded; `light` avoids unrelated metadata.
+    source = await spindle.chat.getMessages(chatId, { tail: 80, light: true, includeExtra: false });
+  } catch (firstError) {
+    // Older Lumiverse builds may not accept read options. Retry the documented
+    // one-argument form before falling back to messages captured by events.
+    try { source = await spindle.chat.getMessages(chatId); }
+    catch (secondError) {
+      if (archive.messages.length) return archive.messages;
+      throw new Error(`Could not read this chat's history (${secondError?.message || firstError?.message || "permission or host API error"}). Check chat_mutation permission and reload Evermore.`);
+    }
+  }
+  if (!Array.isArray(source)) {
+    if (Array.isArray(source?.data)) source = source.data;
+    else if (archive.messages.length) return archive.messages;
+    else throw new Error("Lumiverse returned an unexpected chat-history response. Please reload Evermore and try again.");
+  }
+  const normalized = source
+    .filter(m => m && !m.hidden && typeof (m.content ?? m.text ?? m.mes) === "string")
     .map(m => normalizeMessage(m, chatId))
-    .slice(-800);
+    .filter(m => m.content.trim())
+    .slice(-80);
+  // If an older host returns no history but MESSAGE_SENT capture has entries,
+  // retain those instead of replacing them with an empty list.
+  archive.messages = normalized.length ? normalized : archive.messages;
   await saveArchive(archive);
   return archive.messages;
 }
@@ -105,7 +126,7 @@ spindle.onFrontendMessage(async (payload, userId) => {
     }
     const hasChat = typeof payload?.chatId === "string" && payload.chatId.length > 0;
     const noteActions = new Set(["evermore:get", "evermore:save-note", "evermore:autosave-note", "evermore:delete-note", "evermore:upload-image"]);
-    if (!hasChat && !noteActions.has(type)) throw new Error("Open a roleplay chat before recording a scene.");
+    if (!hasChat && !noteActions.has(type) && type !== "evermore:analyse") throw new Error("Open a roleplay chat before recording a scene.");
     // Manual notebook pages also work from Lumiverse's home screen. They are
     // kept in a dedicated personal archive rather than being discarded or
     // blocked when there is no active roleplay chat.
@@ -123,6 +144,7 @@ spindle.onFrontendMessage(async (payload, userId) => {
         title: textOf(n.title || "Untitled note").slice(0, 140),
         body: textOf(n.body).slice(0, 60000),
         bodyHtml: textOf(n.bodyHtml).slice(0, 120000),
+        fontSize: /^\d{1,2}px$/.test(textOf(n.fontSize)) ? textOf(n.fontSize) : "14px",
         updatedAt: Date.now()
       };
       const i = archive.notes.findIndex(x => x.id === note.id);
@@ -160,42 +182,67 @@ spindle.onFrontendMessage(async (payload, userId) => {
       return;
     }
     if (type === "evermore:analyse") {
-      await syncChatMessages(payload.chatId, archive);
-      const recent = archive.messages.slice(-30);
-      if (!recent.length) throw new Error("This chat does not contain any messages to record yet.");
+      // Resolve the active chat at click time. A floating widget can remain
+      // mounted while the user switches roleplay chats, so its cached chatId
+      // must never decide which conversation is recorded.
+      const activeChat = await spindle.chats.getActive();
+      const targetChatId = activeChat?.id || null;
+      if (!targetChatId) throw new Error("No active roleplay chat was found. Open the conversation first, then try Record recent scene again.");
+      const targetChatName = activeChat?.name || payload.chatName || "";
+      const sceneArchive = await loadArchive(targetChatId, targetChatName);
+      const recent = (await syncChatMessages(targetChatId, sceneArchive)).slice(-30);
+      if (!recent.length) throw new Error("No readable roleplay messages were found in this chat. Send a few messages and try again.");
+
       const prompt = [
         "You are Evermore, a careful roleplay archivist. Create a faithful scene record from this excerpt.",
-        "Return ONLY JSON with keys: title, location, characters (array of names), summary, events (array), importantDialogue (array), emotions (array), relationshipChanges (array), continuity (array), unresolved (array).",
-        "Do not invent facts or silently convert guesses into canon. Keep uncertain details under continuity prefixed with 'Possible inference:'. Keep summary concise.",
+        "Return one valid JSON object only, with no markdown fences or commentary.",
+        "Use these keys: title (string), location (string), characters (array of names), summary (string), events (array of strings), importantDialogue (array of strings), emotions (array of strings), relationshipChanges (array of strings), continuity (array of strings), unresolved (array of strings).",
+        "Do not invent facts or silently convert guesses into canon. Put uncertain details under continuity prefixed with 'Possible inference:'. Keep summary concise. Use empty strings or arrays when unknown.",
         JSON.stringify(recent.map(m => ({ role: m.role, name: m.name, content: m.content })))
       ].join("\n\n");
+
       let result;
-      if (payload.mode === "separate") {
-        if (!payload.connectionId) throw new Error("Choose a saved Lumiverse connection in Evermore Settings first.");
-        result = await spindle.generate.raw({ connection_id: payload.connectionId, messages: [{ role: "user", content: prompt }], parameters: { temperature: 0.2, max_tokens: 1200 } });
-      } else {
-        // quiet() is Lumiverse's documented route to the currently active profile.
-        result = await spindle.generate.quiet({ messages: [{ role: "user", content: prompt }], parameters: { temperature: 0.2, max_tokens: 1200 } });
+      try {
+        if (payload.mode === "separate") {
+          if (!payload.connectionId) throw new Error("Choose a saved Lumiverse connection in Evermore Settings first.");
+          const profile = await spindle.connections?.get?.(payload.connectionId);
+          if (spindle.connections?.get && !profile) throw new Error("That saved connection could not be found. Choose another connection in Settings.");
+          result = await spindle.generate.raw({ connection_id: payload.connectionId, messages: [{ role: "user", content: prompt }], parameters: { temperature: 0.2, max_tokens: 1600 } });
+        } else {
+          // quiet() is Lumiverse's documented route to the currently active profile.
+          result = await spindle.generate.quiet({ messages: [{ role: "user", content: prompt }], parameters: { temperature: 0.2, max_tokens: 1600 } });
+        }
+      } catch (generationError) {
+        throw new Error(`AI generation failed: ${generationError?.message || generationError}`);
       }
+
+      const rawContent = textOf(result?.content).trim();
+      if (!rawContent) throw new Error("The AI connection returned an empty response. Check that the selected connection is working, then try again.");
       let parsed;
       try {
-        const raw = textOf(result?.content).replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
-        const start = raw.indexOf("{"); const end = raw.lastIndexOf("}");
-        parsed = JSON.parse(start >= 0 && end > start ? raw.slice(start, end + 1) : raw);
-      } catch { throw new Error("The AI response could not be read as a scene record. Please try again."); }
+        const unfenced = rawContent.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+        const startJson = unfenced.indexOf("{");
+        const endJson = unfenced.lastIndexOf("}");
+        if (startJson < 0 || endJson <= startJson) throw new Error("No JSON object found");
+        parsed = JSON.parse(unfenced.slice(startJson, endJson + 1));
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("The response was not a JSON object");
+      } catch (parseError) {
+        throw new Error(`The AI replied, but its scene record was not valid JSON. Try again or choose another connection. (${parseError?.message || "parse error"})`);
+      }
+      const asTextArray = value => Array.isArray(value) ? value.map(textOf).filter(Boolean) : [];
       const scene = {
         id: `scene-${Date.now()}`, title: textOf(parsed.title || "Untitled scene"), location: textOf(parsed.location || "Unspecified location"),
-        characters: Array.isArray(parsed.characters) ? parsed.characters.map(textOf) : [], summary: textOf(parsed.summary),
-        events: Array.isArray(parsed.events) ? parsed.events.map(textOf) : [], importantDialogue: Array.isArray(parsed.importantDialogue) ? parsed.importantDialogue.map(textOf) : [],
-        emotions: Array.isArray(parsed.emotions) ? parsed.emotions.map(textOf) : [], relationshipChanges: Array.isArray(parsed.relationshipChanges) ? parsed.relationshipChanges.map(textOf) : [],
-        continuity: Array.isArray(parsed.continuity) ? parsed.continuity.map(textOf) : [], unresolved: Array.isArray(parsed.unresolved) ? parsed.unresolved.map(textOf) : [],
+        characters: asTextArray(parsed.characters), summary: textOf(parsed.summary),
+        events: asTextArray(parsed.events), importantDialogue: asTextArray(parsed.importantDialogue),
+        emotions: asTextArray(parsed.emotions), relationshipChanges: asTextArray(parsed.relationshipChanges),
+        continuity: asTextArray(parsed.continuity), unresolved: asTextArray(parsed.unresolved),
         createdAt: Date.now(), messageCount: recent.length, sourceMessageIds: recent.map(m => m.id)
       };
-      archive.scenes.unshift(scene);
-      const known = new Set(archive.characters.map(c => c.name.toLowerCase()));
-      for (const name of scene.characters) if (name && !known.has(name.toLowerCase())) archive.characters.push({ name, firstSeenAt: Date.now(), appearances: 1 });
-      await saveArchive(archive);
-      reply(userId, { type: "evermore:archive", requestId, archive });
+      sceneArchive.scenes.unshift(scene);
+      const known = new Set(sceneArchive.characters.map(c => textOf(c.name).toLowerCase()));
+      for (const name of scene.characters) if (name && !known.has(name.toLowerCase())) sceneArchive.characters.push({ name, firstSeenAt: Date.now(), appearances: 1 });
+      await saveArchive(sceneArchive);
+      reply(userId, { type: "evermore:archive", requestId, chatId: targetChatId, archive: sceneArchive, action: "analyse" });
       return;
     }
   } catch (error) {
@@ -203,4 +250,4 @@ spindle.onFrontendMessage(async (payload, userId) => {
   }
 });
 
-spindle.log.info("[Evermore] Story Journal 0.3.1 ready");
+spindle.log.info("[Evermore] Story Journal 0.3.2 ready");
