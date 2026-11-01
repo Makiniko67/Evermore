@@ -1,4 +1,4 @@
-// Evermore 0.3.4 — responsive dark-lavender story journal with rich manual notes.
+// Evermore 0.4.0 — scene notifications, editable records and cast continuity tracking.
 export function setup(ctx) {
   const widget = ctx.ui.createFloatWidget({
     width: 60, height: 60, initialPosition: { x: 18, y: 170 },
@@ -19,6 +19,8 @@ export function setup(ctx) {
   let connectionMode = "current";
   let selectedConnectionId = "";
   let editingNote = null;
+  let editingScene = null;
+  let sceneSaving = false;
   let noteDraftCache = null;
   let editorHeight = 340;
   let panelWidth = null;
@@ -90,8 +92,15 @@ export function setup(ctx) {
   .ev-btn:disabled{opacity:.55;cursor:wait}
   .ev-btn-ghost{background:#3b2e49;border-color:#685475;color:#eadcf0}
   .ev-btn-danger{background:#593447;border-color:#96647b}
-  .ev-select,.ev-input{display:block;width:100%;min-width:0;margin:7px 0 10px;border:1px solid #705b80;border-radius:12px;background:#201929;color:#f7effa;padding:10px 11px;font-family:inherit;font-size:13px;line-height:1.4;outline:none}
-  .ev-select:focus,.ev-input:focus{border-color:#c5a2d9;box-shadow:0 0 0 3px #c5a2d922}
+  .ev-select,.ev-input,.ev-textarea{display:block;width:100%;min-width:0;margin:7px 0 10px;border:1px solid #705b80;border-radius:12px;background:#201929;color:#f7effa;padding:10px 11px;font-family:inherit;font-size:13px;line-height:1.4;outline:none}
+  .ev-textarea{min-height:86px;resize:vertical}
+  .ev-select:focus,.ev-input:focus,.ev-textarea:focus{border-color:#c5a2d9;box-shadow:0 0 0 3px #c5a2d922}
+  .ev-field-hint{color:#ad9ab9;font-size:10px;line-height:1.45;margin:-5px 0 8px}
+  .ev-cast-edit{border:1px solid #594766;border-radius:13px;background:#2b2237;padding:10px;margin:9px 0}
+  .ev-checkbox-row{display:flex;align-items:center;gap:8px;color:#e1d1e9;font-size:11px;margin:8px 0}
+  .ev-checkbox-row input{accent-color:#b894cf;width:16px;height:16px}
+  .ev-appearance{border-left:2px solid #8e70a5;padding:5px 0 5px 10px;margin:8px 0;color:#d8c8e2;font-size:11px}
+  .ev-intro-status{font-size:10px;color:#d9b9ec;margin-top:6px}
   .ev-label{display:block;color:#d9c8e2;font-size:11px;font-weight:650;margin:10px 0 4px}
   .ev-empty{padding:24px 14px;text-align:center;border:1px dashed #6b557b;border-radius:16px;background:#2a2035;color:#decce7}
   .ev-empty-mark{font:30px Georgia,serif;color:#c8a8d8}
@@ -152,9 +161,10 @@ export function setup(ctx) {
       <div class="ev-panel-resize-grip" role="button" tabindex="0" aria-label="Drag to resize Evermore" title="Drag to resize panel">◢</div>
     </section></div>`;
   }
-  function render() {
+  function render(skipSceneDraftStash = false) {
     // Preserve a live note draft before any external state refresh rebuilds the panel.
     if (expanded && editingNote && root.querySelector("#ev-note-body")) stashDraftFromEditor();
+    if (!skipSceneDraftStash && expanded && editingScene && root.querySelector("[data-scene-editor]")) stashSceneDraftFromEditor();
     if (!expanded) {
       root.innerHTML = `<style>${css}</style><div class="ev-root"><div class="ev-launcher-wrap"><button class="ev-launcher" type="button" aria-label="Open Evermore" title="Open Evermore">✧</button></div></div>`;
       root.querySelector(".ev-launcher").addEventListener("click", openJournal);
@@ -394,17 +404,80 @@ export function setup(ctx) {
       <div class="ev-connection-current"><strong>Currently active:</strong> ${esc(currentName)}</div>
       ${connectionMode === "separate" ? `<label class="ev-label" for="ev-connection-choice">Choose connection</label><select class="ev-select" id="ev-connection-choice"><option value="">Select a connection…</option>${connectionOptions()}</select>` : ""}`;
   }
+  function sceneCastForEdit(scene) {
+    if (Array.isArray(scene.cast)) return scene.cast.map(row => ({
+      name: String(row?.name || ""), position: String(row?.position || ""),
+      introducedHere: row?.introducedHere === true, introduction: String(row?.introduction || ""), notes: String(row?.notes || "")
+    }));
+    return (scene.characters || []).map(name => ({ name: String(name || ""), position: "", introducedHere: false, introduction: "", notes: "" }));
+  }
+  function sceneEditor() {
+    const s = editingScene || {};
+    const fields = [
+      ["summary", "Scene summary", false, "The main events and emotional arc…"],
+      ["events", "Story beats", true, "One event per line…"],
+      ["importantDialogue", "Important dialogue", true, "One quotation or exchange per line…"],
+      ["emotions", "Emotions", true, "One emotional beat per line…"],
+      ["relationshipChanges", "Relationship changes", true, "One change per line…"],
+      ["continuity", "Continuity details", true, "One detail per line…"],
+      ["unresolved", "Unresolved threads", true, "One open question per line…"]
+    ];
+    const cast = sceneCastForEdit(s);
+    return `<div data-scene-editor><div class="ev-kicker">Scene archive · Edit record</div><h2 class="ev-page-title">Shape this memory.</h2><p class="ev-intro">Changes are saved to this scene and the Cast appearance timeline is rebuilt from the edited record.</p>
+      <label class="ev-label" for="ev-scene-title">Scene title</label><input id="ev-scene-title" class="ev-input" data-scene-field="title" maxlength="180" value="${esc(s.title || "")}"/>
+      <label class="ev-label" for="ev-scene-location">Scene location</label><input id="ev-scene-location" class="ev-input" data-scene-field="location" maxlength="240" placeholder="Where does this scene take place?" value="${esc(s.location || "")}"/>
+      ${fields.map(([key,label,isArray,placeholder]) => `<label class="ev-label" for="ev-scene-${key}">${label}</label>${isArray ? `<textarea id="ev-scene-${key}" class="ev-textarea" data-scene-field="${key}" placeholder="${esc(placeholder)}">${esc(Array.isArray(s[key]) ? s[key].join("\n") : String(s[key] || ""))}</textarea>` : `<textarea id="ev-scene-${key}" class="ev-textarea" data-scene-field="${key}" placeholder="${esc(placeholder)}">${esc(s[key] || "")}</textarea>`}`).join("")}
+      <div class="ev-section"><h3 class="ev-section-title">Cast in this scene</h3><span class="ev-pill">${cast.length} listed</span></div>
+      <p class="ev-field-hint">Add each character who is actually present. Position means where they are within the scene; introduction should only be marked when the story explicitly introduces them here.</p>
+      ${cast.map((row,i) => `<div class="ev-cast-edit" data-cast-index="${i}"><div class="ev-row"><strong class="ev-card-title" style="font-size:14px">Cast member ${i+1}</strong>${button("Remove", `remove-scene-cast:${i}`, "ev-btn-danger")}</div>
+        <label class="ev-label">Character name</label><input class="ev-input" data-cast-field="name" maxlength="120" value="${esc(row.name)}" placeholder="Character name"/>
+        <label class="ev-label">Position / where they are</label><input class="ev-input" data-cast-field="position" maxlength="240" value="${esc(row.position)}" placeholder="e.g. seated near the window"/>
+        <label class="ev-checkbox-row"><input type="checkbox" data-cast-field="introducedHere" ${row.introducedHere ? "checked" : ""}/> First introduced in this scene</label>
+        <label class="ev-label">Introduction details</label><textarea class="ev-textarea" data-cast-field="introduction" placeholder="How the story introduces them…">${esc(row.introduction)}</textarea>
+        <label class="ev-label">Appearance notes</label><textarea class="ev-textarea" data-cast-field="notes" placeholder="Clothing, condition, notable details…">${esc(row.notes)}</textarea>
+      </div>`).join("")}
+      ${button("＋ Add cast member", "add-scene-cast", "ev-btn-ghost")}<div class="ev-rule"></div><div class="ev-note-actions">${button("Cancel", "cancel-scene", "ev-btn-ghost", sceneSaving)}${button(sceneSaving ? "Saving…" : "Save scene record", "save-scene", "", sceneSaving)}</div></div>`;
+  }
   function scenesPage() {
-    const scenes = (archive.scenes || []).map(s => `<article class="ev-card"><div class="ev-row"><span class="ev-date">${new Date(s.createdAt || Date.now()).toLocaleDateString()}</span><span class="ev-inline-label">${(s.characters || []).length} ${((s.characters || []).length === 1) ? "character" : "characters"}</span></div><h3 class="ev-card-title" style="margin-top:9px">${esc(s.title || "Untitled scene")}</h3><div class="ev-kicker" style="margin-top:6px">${esc(s.location || "Unspecified location")}</div><p class="ev-muted" style="margin:9px 0 0">${esc(s.summary || "No summary available.")}</p>${listBlock("Story beats", s.events)}${listBlock("Unresolved threads", s.unresolved)}<div class="ev-rule"></div>${button("Delete scene", "delete-scene", "ev-btn-danger")}<span hidden data-scene-id="${esc(s.id)}"></span></article>`).join("");
+    if (editingScene) return sceneEditor();
+    const scenes = (archive.scenes || []).map(s => `<article class="ev-card" data-scene-card data-scene-id="${esc(s.id)}"><div class="ev-row"><span class="ev-date">${new Date(s.createdAt || Date.now()).toLocaleDateString()}</span><span class="ev-inline-label">${(s.characters || []).length} ${((s.characters || []).length === 1) ? "character" : "characters"}</span></div><h3 class="ev-card-title" style="margin-top:9px">${esc(s.title || "Untitled scene")}</h3><div class="ev-kicker" style="margin-top:6px">${esc(s.location || "Unspecified location")}</div><p class="ev-muted" style="margin:9px 0 0">${esc(s.summary || "No summary available.")}</p>${listBlock("Story beats", s.events)}${listBlock("Unresolved threads", s.unresolved)}<div class="ev-rule"></div><div class="ev-note-actions">${button("Edit record", `edit-scene:${s.id}`, "ev-btn-ghost")}${button("Delete scene", "delete-scene", "ev-btn-danger")}</div></article>`).join("");
     return `<div class="ev-kicker">The chronicle</div><h2 class="ev-page-title">Your story, preserved.</h2><p class="ev-intro">A quiet little place for the moments, twists and feelings you don't want to lose.</p>
       <div class="ev-stats"><div class="ev-stat"><strong>${(archive.scenes || []).length}</strong><span>Scenes</span></div><div class="ev-stat"><strong>${(archive.characters || []).length}</strong><span>Characters</span></div><div class="ev-stat"><strong>${(archive.notes || []).length}</strong><span>Notes</span></div></div>
-      <section class="ev-card"><div class="ev-kicker">Preserve a moment</div><h3 class="ev-card-title" style="margin:5px 0">Record a scene</h3><p class="ev-muted">Evermore checks the currently open Lumiverse chat, reads its recent messages and drafts a structured scene note for you to review.</p>${connectionControls()}<button type="button" class="ev-btn" data-action="analyse" ${busy ? "disabled" : ""}>${busy ? "Preparing your scene…" : "✧ Record recent scene"}</button><div class="ev-inline-label" style="margin-top:8px">Your message archive is kept separately for each roleplay chat.</div></section>
+      <section class="ev-card"><div class="ev-kicker">Preserve a moment</div><h3 class="ev-card-title" style="margin:5px 0">Record a scene</h3><p class="ev-muted">Evermore checks the currently open Lumiverse chat, reads its recent messages and drafts a structured scene note for you to review.</p>${connectionControls()}<button type="button" class="ev-btn" data-action="analyse" ${busy ? "disabled" : ""}>${busy ? "Preparing your scene…" : "✧ Record recent scene"}</button><div class="ev-inline-label" style="margin-top:8px">You'll be notified when preparation starts and when the saved record is ready.</div></section>
       <div class="ev-section"><h3 class="ev-section-title">Recorded scenes</h3><span class="ev-pill">Latest first</span></div>${scenes || `<div class="ev-empty"><div class="ev-empty-mark">✧</div><p>Your first chapter is waiting.</p><span class="ev-muted">Send a few roleplay messages, then record your first scene.</span></div>`}`;
   }
   function listBlock(label, items) { return Array.isArray(items) && items.length ? `<div class="ev-kicker" style="margin-top:12px">${label}</div><ul class="ev-list">${items.slice(0,8).map(x => `<li>${esc(x)}</li>`).join("")}</ul>` : ""; }
   function charactersPage() {
     const chars = archive.characters || [];
-    return `<div class="ev-kicker">The people in your pages</div><h2 class="ev-page-title">Character keepsakes</h2><p class="ev-intro">Names are added from recorded scenes. Evermore keeps this list within the current roleplay chat for now.</p>${chars.map(c => `<article class="ev-card"><div class="ev-row"><h3 class="ev-card-title">♡ ${esc(c.name)}</h3><span class="ev-pill">Character</span></div><div class="ev-muted" style="margin-top:6px">Appears in this chat's recorded story.</div></article>`).join("") || `<div class="ev-empty"><div class="ev-empty-mark">♡</div><p>No character cards yet.</p><span class="ev-muted">Record a scene to start collecting the cast.</span></div>`}`;
+    const cards = chars.map(c => {
+      const appearances = Array.isArray(c.appearances) ? c.appearances : [];
+      const count = appearances.length || Number(c.appearanceCount || c.appearances || 0);
+      const introduced = !!c.introducedInSceneId;
+      return `<article class="ev-card"><div class="ev-row"><h3 class="ev-card-title">♡ ${esc(c.name)}</h3><span class="ev-pill">${count} appearances</span></div>
+        <div class="ev-intro-status">${introduced ? `Introduced in: ${esc(c.introducedInSceneTitle || "Recorded scene")}` : "Introduction not confirmed in recorded scenes"}</div>
+        ${c.introductionContext ? `<p class="ev-muted" style="margin:7px 0 0">${esc(c.introductionContext)}</p>` : ""}
+        <div class="ev-kicker" style="margin-top:12px">Appearance history</div>
+        ${appearances.length ? appearances.map(a => `<div class="ev-appearance"><strong>${esc(a.sceneTitle || "Untitled scene")}</strong> <span>· ${new Date(a.at || Date.now()).toLocaleDateString()}</span><div>Location: ${esc(a.location || "Not recorded")}</div><div>Position: ${esc(a.position || "Not recorded")}</div>${a.introducedHere ? `<div class="ev-intro-status">Introduced here${a.introduction ? ` — ${esc(a.introduction)}` : ""}</div>` : ""}${a.notes ? `<div>${esc(a.notes)}</div>` : ""}</div>`).join("") : `<p class="ev-muted">No scene-level appearance details yet. Edit a scene record to add positions and introduction notes.</p>`}
+      </article>`;
+    }).join("");
+    return `<div class="ev-kicker">The people in your pages</div><h2 class="ev-page-title">Character keepsakes</h2><p class="ev-intro">The Cast remembers each character's first confirmed introduction, scene locations, and where they were during every recorded appearance. Edit a scene record to correct any detail.</p>${cards || `<div class="ev-empty"><div class="ev-empty-mark">♡</div><p>No character cards yet.</p><span class="ev-muted">Record a scene to start collecting the cast.</span></div>`}`;
+  }
+  function stashSceneDraftFromEditor() {
+    if (!editingScene) return;
+    const editor = root.querySelector("[data-scene-editor]"); if (!editor) return;
+    const read = key => editor.querySelector(`[data-scene-field="${key}"]`)?.value || "";
+    editingScene.title = read("title"); editingScene.location = read("location"); editingScene.summary = read("summary");
+    for (const key of ["events", "importantDialogue", "emotions", "relationshipChanges", "continuity", "unresolved"]) {
+      editingScene[key] = read(key).split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+    }
+    editingScene.cast = Array.from(editor.querySelectorAll("[data-cast-index]")).map(row => ({
+      name: row.querySelector('[data-cast-field="name"]')?.value?.trim() || "",
+      position: row.querySelector('[data-cast-field="position"]')?.value?.trim() || "",
+      introducedHere: !!row.querySelector('[data-cast-field="introducedHere"]')?.checked,
+      introduction: row.querySelector('[data-cast-field="introduction"]')?.value?.trim() || "",
+      notes: row.querySelector('[data-cast-field="notes"]')?.value?.trim() || ""
+    })).filter(row => row.name);
+    editingScene.characters = editingScene.cast.map(row => row.name);
   }
   function notesPage() {
     if (!editingNote && noteDraftCache) editingNote = { ...noteDraftCache };
@@ -438,9 +511,10 @@ export function setup(ctx) {
     return `<div class="ev-kicker">A few details</div><h2 class="ev-page-title">Journal settings</h2><p class="ev-intro">Choose which Lumiverse AI connection Evermore uses for scene recording.</p>
       <article class="ev-card"><h3 class="ev-card-title">AI connection</h3>${connectionControls()}<p class="ev-muted">“Current Lumiverse connection” follows the profile you have active in Lumiverse. “Choose another connection” uses the specific profile selected below.</p></article>
       <article class="ev-card"><h3 class="ev-card-title">Current archive</h3><p class="ev-muted">${chatId ? `This journal is storing notes and captured messages for <strong>${esc(chatName || "the current chat")}</strong>.` : "Your personal notebook is available from the home screen. Scene archives are kept separately inside each roleplay chat."}</p><div class="ev-rule"></div><div class="ev-row"><span class="ev-muted">Captured messages</span><strong>${(archive.messages || []).length}</strong></div><div class="ev-row" style="margin-top:8px"><span class="ev-muted">Saved scenes</span><strong>${(archive.scenes || []).length}</strong></div><div class="ev-row" style="margin-top:8px"><span class="ev-muted">Notebook pages</span><strong>${(archive.notes || []).length}</strong></div></article>
+      <article class="ev-card ev-card-soft"><h3 class="ev-card-title">Scene notifications</h3><p class="ev-muted">In-app notifications announce when Evermore starts preparing a scene and when the record is saved. For device notifications while Lumiverse is in the background, grant Evermore the <strong>push_notification</strong> permission in the Extensions panel and enable push notifications for this device in Lumiverse Settings.</p></article>
       <article class="ev-card ev-card-soft"><h3 class="ev-card-title">Manual notes</h3><p class="ev-muted">Use headings, text sizes, colours, highlights, lists, quotes and imported photos. Expand the editor or resize its writing area while editing.</p></article>
       <article class="ev-card ev-card-soft"><h3 class="ev-card-title">Privacy & accuracy</h3><p class="ev-muted">Captured messages and notes stay in Lumiverse's private extension storage. Recording a scene sends the recent excerpt to the connection you choose. AI-generated summaries are drafts, not automatically verified canon.</p></article>
-      <article class="ev-card ev-card-soft"><h3 class="ev-card-title">About this build</h3><p class="ev-muted">Evermore 0.3.4 preview. Automatic message capture and manual scene recording are included. Automatic scene-boundary detection, shared cross-chat character profiles and archive export are not included yet.</p></article>`;
+      <article class="ev-card ev-card-soft"><h3 class="ev-card-title">About this build</h3><p class="ev-muted">Evermore 0.4.0 preview. Automatic message capture, editable scene records, scene notifications and per-chat cast appearance tracking are included. Automatic scene-boundary detection, shared cross-chat character profiles and archive export are not included yet.</p></article>`;
   }
 
   async function refreshConnections() {
@@ -508,9 +582,34 @@ export function setup(ctx) {
       if (window.confirm("Delete this notebook page?")) request("evermore:delete-note", { noteId: action.slice(12) });
       return;
     }
+    if (action.startsWith("edit-scene:")) {
+      const scene = archive.scenes.find(s => s.id === action.slice(11));
+      if (scene) { editingScene = { ...scene, cast: sceneCastForEdit(scene) }; activeTab = "scenes"; render(); }
+      return;
+    }
+    if (action === "add-scene-cast") {
+      if (sceneSaving) return;
+      stashSceneDraftFromEditor(); editingScene.cast.push({ name: "", position: "", introducedHere: false, introduction: "", notes: "" }); render(true); return;
+    }
+    if (action.startsWith("remove-scene-cast:")) {
+      if (sceneSaving) return;
+      stashSceneDraftFromEditor(); editingScene.cast.splice(Number(action.split(":").pop()), 1); render(true); return;
+    }
+    if (action === "cancel-scene") {
+      if (sceneSaving) return;
+      editingScene = null; render(); return;
+    }
+    if (action === "save-scene") {
+      if (sceneSaving || !editingScene) return;
+      stashSceneDraftFromEditor();
+      if (!editingScene.title?.trim()) { say("Please give this scene a title before saving."); return; }
+      const scene = { ...editingScene };
+      sceneSaving = true; render(); say("Saving your scene record…");
+      request("evermore:save-scene", { scene }); return;
+    }
     if (action === "delete-scene") {
-      const id = element.parentElement?.querySelector("[data-scene-id]")?.dataset.sceneId;
-      if (id && window.confirm("Delete this scene record?")) request("evermore:delete-scene", { sceneId: id }); return;
+      const id = element.closest("[data-scene-card]")?.dataset.sceneId;
+      if (id && window.confirm("Delete this scene record? Its cast appearance history will also be updated.")) request("evermore:delete-scene", { sceneId: id }); return;
     }
     if (action === "analyse") {
       if (busy) return;
@@ -604,6 +703,7 @@ export function setup(ctx) {
       const nextChatId = payload.chatId || null;
       const changed = chatId !== nextChatId;
       if (changed && editingNote) { saveDraftNow(); editingNote = null; noteDraftCache = null; editorExpanded = false; }
+      if (changed) { editingScene = null; sceneSaving = false; }
       chatId = nextChatId; chatName = payload.chatName || "";
       if (expanded && changed) { archive = { chatId, chatName, messages: [], scenes: [], notes: [], characters: [] }; render(); request("evermore:get"); }
       else if (expanded) { render(); request("evermore:get"); }
@@ -613,9 +713,11 @@ export function setup(ctx) {
       if (expanded) render();
     } else if (payload.type === "evermore:archive") {
       archive = payload.archive || archive; busy = false;
-      if (payload.action === "analyse" && payload.chatId) { chatId = payload.chatId; chatName = archive.chatName || chatName; }
+      if (payload.action === "analyse" && payload.chatId) { chatId = payload.chatId; chatName = archive.chatName || chatName; say("Scene record complete and saved. Cast appearances have been updated."); }
+      else if (payload.action === "save-scene") { editingScene = null; sceneSaving = false; say("Scene record saved. Cast appearance history updated."); }
+      else if (payload.action === "delete-scene") say("Scene deleted and cast appearance history updated.");
       if (expanded && !editingNote) render();
-      else if (expanded) say("Page saved.");
+      else if (expanded && editingNote) say("Page saved.");
     } else if (payload.type === "evermore:note-saved") {
       if (payload.chatId && payload.chatId !== chatId) return;
       if (payload.note) {
@@ -628,7 +730,7 @@ export function setup(ctx) {
       insertUploadedImage(payload.image || {});
       if (payload.requestId === pendingImageRequest) pendingImageRequest = null;
     } else if (payload.type === "evermore:error") {
-      busy = false;
+      busy = false; sceneSaving = false;
       if (pendingImageRequest) {
         pendingUploadError = payload.error || "Image upload failed.";
         pendingImageRequest = null;
