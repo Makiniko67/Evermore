@@ -1,0 +1,13 @@
+{
+  "version": "0.3.0",
+  "name": "Evermore — Story Journal",
+  "identifier": "evermore",
+  "author": "Makiniko67",
+  "github": "https://github.com/Makiniko67/Evermore",
+  "homepage": "https://github.com/Makiniko67/Evermore",
+  "description": "A soft-coquette, dark-lavender roleplay journal with rich manual notes, photo imports and flexible AI connection selection.",
+  "permissions": ["ui_panels", "generation", "chats", "images"],
+  "entry_backend": "dist/backend.js",
+  "entry_frontend": "dist/frontend.js",
+  "minimum_lumiverse_version": "0.1.0"
+}
