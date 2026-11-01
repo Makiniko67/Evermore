@@ -1,4 +1,4 @@
-// Evermore 0.3.1 — responsive dark-lavender story journal with rich manual notes.
+// Evermore 0.3.2 — responsive dark-lavender story journal with rich manual notes.
 export function setup(ctx) {
   const widget = ctx.ui.createFloatWidget({
     width: 60, height: 60, initialPosition: { x: 18, y: 170 },
@@ -20,7 +20,11 @@ export function setup(ctx) {
   let selectedConnectionId = "";
   let editingNote = null;
   let noteDraftCache = null;
-  let editorHeight = 300;
+  let editorHeight = 340;
+  let panelWidth = null;
+  let panelHeight = null;
+  let panelResizeDrag = null;
+  let editorResizeDrag = null;
   let savedRange = null;
   let busy = false;
   let uploading = false;
@@ -36,8 +40,12 @@ export function setup(ctx) {
   const resize = open => {
     if (!open) { widget.setSize(60, 60); return; }
     const v = viewport();
-    if (editorExpanded) widget.setSize(Math.min(720, v.width - 16), v.height - 16);
-    else widget.setSize(Math.min(460, v.width - 18), Math.min(780, v.height - 24));
+    const maxW = Math.max(300, v.width - 24);
+    const maxH = Math.max(400, v.height - 24);
+    if (panelWidth == null) panelWidth = Math.min(460, maxW);
+    if (panelHeight == null) panelHeight = Math.min(780, maxH);
+    if (editorExpanded) widget.setSize(maxW, maxH);
+    else widget.setSize(Math.min(maxW, Math.max(300, panelWidth)), Math.min(maxH, Math.max(400, panelHeight)));
   };
 
   const css = `
@@ -46,7 +54,7 @@ export function setup(ctx) {
   .ev-root{width:100%;height:100%;min-width:0;min-height:0;font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;color:#f5eef9;font-size:14px;line-height:1.45}
   .ev-launcher-wrap{width:100%;height:100%;display:flex;align-items:center;justify-content:center}
   .ev-launcher{width:58px;height:58px;border-radius:22px 22px 22px 8px;border:1px solid #d5b7e8;background:linear-gradient(145deg,#b89ad0 0%,#785b99 48%,#49345f 100%);color:#fff;font:30px Georgia,serif;box-shadow:0 8px 26px #12091f99,inset 0 1px #ffffff66;cursor:pointer;touch-action:manipulation}
-  .ev-panel{height:100%;width:100%;min-width:0;min-height:0;display:flex;flex-direction:column;overflow:hidden;border:1px solid #9278a9;border-radius:24px;background:linear-gradient(160deg,#30243e 0%,#211a2e 54%,#1c1727 100%);box-shadow:0 18px 54px #100918c9,inset 0 1px #ffffff14}
+  .ev-panel{position:relative;height:100%;width:100%;min-width:0;min-height:0;display:flex;flex-direction:column;overflow:hidden;border:1px solid #9278a9;border-radius:24px;background:linear-gradient(160deg,#30243e 0%,#211a2e 54%,#1c1727 100%);box-shadow:0 18px 54px #100918c9,inset 0 1px #ffffff14}
   .ev-panel.ev-writing-mode{border-radius:18px}
   .ev-header{flex:none;padding:14px 16px 11px;background:linear-gradient(135deg,#59436d,#342643 72%);border-bottom:1px solid #705981}
   .ev-head-top{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
@@ -102,13 +110,16 @@ export function setup(ctx) {
   .ev-connection-current{padding:9px 10px;border:1px solid #594566;border-radius:12px;background:#2b2136;color:#e7d8ed;font-size:11px;margin:8px 0}
   .ev-connection-current strong{color:#fff}
   .ev-editor-shell{border:1px solid #755d85;border-radius:15px;background:#f8f3fb;color:#292132;overflow:hidden;display:flex;flex-direction:column;min-width:0}
+  .ev-rich-editor-wrap{position:relative;width:100%;height:340px;min-height:180px;flex:none}
+  .ev-editor-resize-grip{position:absolute;right:3px;bottom:3px;width:30px;height:30px;display:flex;align-items:center;justify-content:center;border:1px solid #c4afcf;border-radius:9px;background:#fff;color:#725386;font-size:18px;font-weight:700;touch-action:none;user-select:none;cursor:nwse-resize;z-index:2}
+  .ev-panel-resize-grip{position:absolute;right:2px;bottom:2px;width:25px;height:25px;display:flex;align-items:center;justify-content:center;border:1px solid #b99acb;border-radius:8px 0 18px 0;background:#49375b;color:#f5eafa;font-size:16px;line-height:1;touch-action:none;user-select:none;cursor:nwse-resize;z-index:8;opacity:.9}
   .ev-toolbar{display:flex;align-items:center;gap:5px;flex-wrap:wrap;padding:8px;background:#e9deef;border-bottom:1px solid #cbb8d7}
   .ev-tool{min-width:34px;height:34px;padding:0 8px;border:1px solid #c4afcf;border-radius:9px;background:#fff;color:#46364f;font-size:12px;font-weight:700;cursor:pointer;touch-action:manipulation}
   .ev-tool:active{background:#d9c5e6}
   .ev-tool-select{height:34px;max-width:120px;border:1px solid #c4afcf;border-radius:9px;background:#fff;color:#46364f;padding:0 6px;font-size:11px}
   .ev-colour{width:35px;height:34px;padding:3px;border:1px solid #c4afcf;border-radius:9px;background:#fff}
   .ev-toolbar-label{font-size:10px;color:#4b3a53;padding-left:2px}
-  .ev-rich-editor{width:100%;min-height:260px;height:300px;overflow:auto;resize:vertical;padding:15px 14px;background:#fbf8fd;color:#2c2433;font:14px/1.65 Georgia,'Times New Roman',serif;outline:none;overflow-wrap:anywhere;touch-action:pan-y}
+  .ev-rich-editor{width:100%;min-height:180px;height:100%;overflow:auto;resize:none;padding:15px 14px 36px;background:#fbf8fd;color:#2c2433;font:14px/1.65 Georgia,'Times New Roman',serif;outline:none;overflow-wrap:anywhere;touch-action:pan-y}
   .ev-rich-editor:empty:before{content:attr(data-placeholder);color:#9b8ca3;pointer-events:none}
   .ev-rich-editor img{max-width:100%;height:auto;display:block;margin:12px auto;border-radius:10px}
   .ev-editor-sizebar{display:flex;gap:6px;align-items:center;justify-content:space-between;flex-wrap:wrap;padding:8px 10px;background:#efe7f3;border-top:1px solid #cbb8d7}
@@ -119,7 +130,9 @@ export function setup(ctx) {
   .ev-writing-mode .ev-note-edit-card{flex:1;display:flex;flex-direction:column}
   .ev-writing-mode .ev-editor-shell{flex:1;min-height:0}
   .ev-writing-mode .ev-editor-shell{flex:1;min-height:0}
-  .ev-writing-mode .ev-rich-editor{flex:1;min-height:320px;height:auto;resize:none}
+  .ev-writing-mode .ev-rich-editor-wrap{flex:1;min-height:320px;height:auto!important}
+  .ev-writing-mode .ev-rich-editor{flex:1;min-height:320px;height:100%!important}
+  .ev-writing-mode .ev-panel-resize-grip{display:none}
   @media(max-width:360px){.ev-header{padding:11px}.ev-main{padding:11px 9px 18px}.ev-page-title{font-size:22px}.ev-tabs{padding:7px}.ev-tab{flex-basis:60px;padding:8px 4px;font-size:10px}.ev-toolbar{gap:4px;padding:6px}.ev-tool{min-width:31px;height:32px}}
   @media(prefers-reduced-motion:no-preference){.ev-panel{animation:ev-in .18s ease-out}@keyframes ev-in{from{opacity:.7;transform:translateY(5px) scale(.99)}to{opacity:1;transform:none}}}
   `;
@@ -136,6 +149,7 @@ export function setup(ctx) {
       ${writing ? "" : `<nav class="ev-tabs" aria-label="Journal sections">${tab("scenes","✧ Scenes")}${tab("characters","♡ Cast")}${tab("notes","✎ Notes")}${tab("settings","⚙ Settings")}</nav>`}
       <main class="ev-main">${page}<div class="ev-toast" role="status" aria-live="polite">${esc(toastMessage)}</div></main>
       ${writing ? "" : `<footer class="ev-footer">A LITTLE ARCHIVE OF YOUR IMAGINED WORLDS</footer>`}
+      <div class="ev-panel-resize-grip" role="button" tabindex="0" aria-label="Drag to resize Evermore" title="Drag to resize panel">◢</div>
     </section></div>`;
   }
   function render() {
@@ -169,14 +183,20 @@ export function setup(ctx) {
     const title = root.querySelector("#ev-note-title");
     if (title) title.addEventListener("input", queueAutosave);
     const sizeSelect = root.querySelector("#ev-font-size");
-    sizeSelect?.addEventListener("change", () => applyFontSize(sizeSelect.value));
+    if (sizeSelect) {
+      sizeSelect.addEventListener("pointerdown", rememberSelection);
+      sizeSelect.addEventListener("mousedown", rememberSelection);
+      sizeSelect.addEventListener("change", () => applyFontSize(sizeSelect.value));
+    }
+    root.querySelector(".ev-panel-resize-grip")?.addEventListener("pointerdown", startPanelResize);
+    root.querySelector(".ev-editor-resize-grip")?.addEventListener("pointerdown", startEditorResize);
     const blockSelect = root.querySelector("#ev-block-style");
     blockSelect?.addEventListener("change", () => formatEditor(blockSelect.value));
     root.querySelector("#ev-text-colour")?.addEventListener("input", e => formatEditor("foreColor", e.target.value));
     root.querySelector("#ev-highlight-colour")?.addEventListener("input", e => formatEditor("hiliteColor", e.target.value));
     root.querySelector("#ev-image-file")?.addEventListener("change", handleImagePick);
     resize(true);
-    if (editor) editor.style.height = `${editorHeight}px`;
+    if (editor) editor.style.height = "100%";
   }
 
   function plainToHtml(value) { return esc(value || "").replace(/\r?\n/g, "<br>"); }
@@ -234,8 +254,10 @@ export function setup(ctx) {
     if (!editingNote) return;
     const title = root.querySelector("#ev-note-title")?.value ?? editingNote.title ?? "";
     const bodyHtml = currentEditorHtml();
-    const body = root.querySelector("#ev-note-body")?.innerText ?? editingNote.body ?? "";
-    editingNote.draft = { title, body, bodyHtml };
+    const editor = root.querySelector("#ev-note-body");
+    const body = editor?.innerText ?? editingNote.body ?? "";
+    const fontSize = editor?.style.fontSize || editingNote.fontSize || "14px";
+    editingNote.draft = { title, body, bodyHtml, fontSize };
     noteDraftCache = { ...editingNote };
   }
   function saveDraftNow() {
@@ -245,7 +267,7 @@ export function setup(ctx) {
     const draft = editingNote?.draft;
     const isExisting = (archive.notes || []).some(note => note.id === editingNote.id);
     const hasContent = !!(draft?.title?.trim() || draft?.body?.trim() || /<img\b/i.test(draft?.bodyHtml || ""));
-    if (draft && (isExisting || hasContent)) request("evermore:autosave-note", { note: { id: editingNote.id, title: draft.title || "Untitled note", body: draft.body || "", bodyHtml: draft.bodyHtml || "" } });
+    if (draft && (isExisting || hasContent)) request("evermore:autosave-note", { note: { id: editingNote.id, title: draft.title || "Untitled note", body: draft.body || "", bodyHtml: draft.bodyHtml || "", fontSize: draft.fontSize || "14px" } });
   }
   function queueAutosave() {
     if (!editingNote) return;
@@ -257,7 +279,54 @@ export function setup(ctx) {
     const selection = window.getSelection?.();
     if (!editor || !selection || !selection.rangeCount) return;
     const range = selection.getRangeAt(0);
+    // Keep the last range inside the editor. Toolbar focus can collapse the
+    // browser selection outside contenteditable on mobile, so don't overwrite it.
     if (editor.contains(range.commonAncestorContainer)) savedRange = range.cloneRange();
+  }
+
+  function startPanelResize(event) {
+    if (editorExpanded) return;
+    event.preventDefault(); event.stopPropagation();
+    const v = viewport();
+    panelResizeDrag = { x: event.clientX, y: event.clientY, width: panelWidth || Math.min(460, v.width - 24), height: panelHeight || Math.min(780, v.height - 24) };
+    window.addEventListener("pointermove", movePanelResize, { passive: false });
+    window.addEventListener("pointerup", stopPanelResize, { once: true });
+    window.addEventListener("pointercancel", stopPanelResize, { once: true });
+  }
+  function movePanelResize(event) {
+    if (!panelResizeDrag) return;
+    event.preventDefault();
+    const v = viewport();
+    panelWidth = Math.max(300, Math.min(v.width - 24, panelResizeDrag.width + event.clientX - panelResizeDrag.x));
+    panelHeight = Math.max(400, Math.min(v.height - 24, panelResizeDrag.height + event.clientY - panelResizeDrag.y));
+    widget.setSize(panelWidth, panelHeight);
+  }
+  function stopPanelResize() {
+    panelResizeDrag = null;
+    window.removeEventListener("pointermove", movePanelResize);
+    window.removeEventListener("pointerup", stopPanelResize);
+    window.removeEventListener("pointercancel", stopPanelResize);
+  }
+  function startEditorResize(event) {
+    if (editorExpanded) return;
+    event.preventDefault(); event.stopPropagation();
+    editorResizeDrag = { y: event.clientY, height: editorHeight };
+    window.addEventListener("pointermove", moveEditorResize, { passive: false });
+    window.addEventListener("pointerup", stopEditorResize, { once: true });
+    window.addEventListener("pointercancel", stopEditorResize, { once: true });
+  }
+  function moveEditorResize(event) {
+    if (!editorResizeDrag) return;
+    event.preventDefault();
+    editorHeight = Math.max(180, Math.min(1000, editorResizeDrag.height + event.clientY - editorResizeDrag.y));
+    const wrap = root.querySelector(".ev-rich-editor-wrap");
+    if (wrap) wrap.style.height = `${editorHeight}px`;
+  }
+  function stopEditorResize() {
+    editorResizeDrag = null;
+    window.removeEventListener("pointermove", moveEditorResize);
+    window.removeEventListener("pointerup", stopEditorResize);
+    window.removeEventListener("pointercancel", stopEditorResize);
   }
   function restoreSelection() {
     const editor = root.querySelector("#ev-note-body");
@@ -288,14 +357,30 @@ export function setup(ctx) {
   function applyFontSize(size) {
     const editor = root.querySelector("#ev-note-body");
     if (!editor) return;
-    if (!restoreSelection()) { say("Select some text first to change its size."); return; }
-    const selection = window.getSelection();
-    if (!selection || !selection.rangeCount || selection.isCollapsed) { say("Select some text first to change its size."); return; }
-    const range = selection.getRangeAt(0);
-    const span = document.createElement("span"); span.style.fontSize = size;
-    try { span.appendChild(range.extractContents()); range.insertNode(span); }
-    catch { say("Select text within a single paragraph to apply a size."); return; }
-    selection.removeAllRanges(); const next = document.createRange(); next.selectNodeContents(span); selection.addRange(next); savedRange = next.cloneRange();
+    const safeSize = /^\d{1,2}px$/.test(String(size)) ? String(size) : "14px";
+    const saved = savedRange && editor.contains(savedRange.commonAncestorContainer) ? savedRange.cloneRange() : null;
+    if (saved && !saved.collapsed) {
+      const selection = window.getSelection?.();
+      if (!selection) return;
+      try {
+        selection.removeAllRanges(); selection.addRange(saved);
+        const range = selection.getRangeAt(0);
+        const span = document.createElement("span"); span.style.fontSize = safeSize;
+        span.appendChild(range.extractContents()); range.insertNode(span);
+        const next = document.createRange(); next.selectNodeContents(span);
+        selection.removeAllRanges(); selection.addRange(next); savedRange = next.cloneRange();
+        say(`Selected text set to ${safeSize}.`);
+      } catch {
+        // If the browser cannot restore a partial selection, change the page's
+        // default text size instead of making the control appear to do nothing.
+        editor.style.fontSize = safeSize;
+        say(`Writing text size set to ${safeSize}.`);
+      }
+    } else {
+      // No text selected: make the size apply to the whole note and new typing.
+      editor.style.fontSize = safeSize;
+      say(`Writing text size set to ${safeSize}.`);
+    }
     queueAutosave();
   }
 
@@ -313,7 +398,7 @@ export function setup(ctx) {
     const scenes = (archive.scenes || []).map(s => `<article class="ev-card"><div class="ev-row"><span class="ev-date">${new Date(s.createdAt || Date.now()).toLocaleDateString()}</span><span class="ev-inline-label">${(s.characters || []).length} ${((s.characters || []).length === 1) ? "character" : "characters"}</span></div><h3 class="ev-card-title" style="margin-top:9px">${esc(s.title || "Untitled scene")}</h3><div class="ev-kicker" style="margin-top:6px">${esc(s.location || "Unspecified location")}</div><p class="ev-muted" style="margin:9px 0 0">${esc(s.summary || "No summary available.")}</p>${listBlock("Story beats", s.events)}${listBlock("Unresolved threads", s.unresolved)}<div class="ev-rule"></div>${button("Delete scene", "delete-scene", "ev-btn-danger")}<span hidden data-scene-id="${esc(s.id)}"></span></article>`).join("");
     return `<div class="ev-kicker">The chronicle</div><h2 class="ev-page-title">Your story, preserved.</h2><p class="ev-intro">A quiet little place for the moments, twists and feelings you don't want to lose.</p>
       <div class="ev-stats"><div class="ev-stat"><strong>${(archive.scenes || []).length}</strong><span>Scenes</span></div><div class="ev-stat"><strong>${(archive.characters || []).length}</strong><span>Characters</span></div><div class="ev-stat"><strong>${(archive.notes || []).length}</strong><span>Notes</span></div></div>
-      <section class="ev-card"><div class="ev-kicker">Preserve a moment</div><h3 class="ev-card-title" style="margin:5px 0">Record a scene</h3><p class="ev-muted">Evermore will read recent messages captured in this chat and draft a structured scene note for you to review.</p>${connectionControls()}<button type="button" class="ev-btn" data-action="analyse" ${(!chatId || busy) ? "disabled" : ""}>${busy ? "Preparing your scene…" : "✧ Record recent scene"}</button><div class="ev-inline-label" style="margin-top:8px">Your message archive is kept separately for each roleplay chat.</div></section>
+      <section class="ev-card"><div class="ev-kicker">Preserve a moment</div><h3 class="ev-card-title" style="margin:5px 0">Record a scene</h3><p class="ev-muted">Evermore checks the currently open Lumiverse chat, reads its recent messages and drafts a structured scene note for you to review.</p>${connectionControls()}<button type="button" class="ev-btn" data-action="analyse" ${busy ? "disabled" : ""}>${busy ? "Preparing your scene…" : "✧ Record recent scene"}</button><div class="ev-inline-label" style="margin-top:8px">Your message archive is kept separately for each roleplay chat.</div></section>
       <div class="ev-section"><h3 class="ev-section-title">Recorded scenes</h3><span class="ev-pill">Latest first</span></div>${scenes || `<div class="ev-empty"><div class="ev-empty-mark">✧</div><p>Your first chapter is waiting.</p><span class="ev-muted">Send a few roleplay messages, then record your first scene.</span></div>`}`;
   }
   function listBlock(label, items) { return Array.isArray(items) && items.length ? `<div class="ev-kicker" style="margin-top:12px">${label}</div><ul class="ev-list">${items.slice(0,8).map(x => `<li>${esc(x)}</li>`).join("")}</ul>` : ""; }
@@ -324,26 +409,27 @@ export function setup(ctx) {
   function notesPage() {
     if (!editingNote && noteDraftCache) editingNote = { ...noteDraftCache };
     if (editingNote) return noteEditor();
-    const notes = (archive.notes || []).map(n => `<article class="ev-card"><div class="ev-row"><div style="min-width:0"><div class="ev-kicker">Notebook page</div><h3 class="ev-card-title">${esc(n.title || "Untitled note")}</h3></div><span class="ev-date">${new Date(n.updatedAt || Date.now()).toLocaleDateString()}</span></div><div class="ev-note-body">${safeBodyHtml(n) || "<em>An empty page.</em>"}</div><div class="ev-rule"></div><div class="ev-note-actions">${button("Edit page", `edit:${n.id}`, "ev-btn-ghost")}${button("Delete", `delete-note:${n.id}`, "ev-btn-danger")}</div></article>`).join("");
+    const notes = (archive.notes || []).map(n => `<article class="ev-card"><div class="ev-row"><div style="min-width:0"><div class="ev-kicker">Notebook page</div><h3 class="ev-card-title">${esc(n.title || "Untitled note")}</h3></div><span class="ev-date">${new Date(n.updatedAt || Date.now()).toLocaleDateString()}</span></div><div class="ev-note-body" style="font-size:${esc(n.fontSize || "13px")}">${safeBodyHtml(n) || "<em>An empty page.</em>"}</div><div class="ev-rule"></div><div class="ev-note-actions">${button("Edit page", `edit:${n.id}`, "ev-btn-ghost")}${button("Delete", `delete-note:${n.id}`, "ev-btn-danger")}</div></article>`).join("");
     return `<div class="ev-row"><div><div class="ev-kicker">Little thoughts & details</div><h2 class="ev-page-title">Your notebook</h2></div>${button("＋ New page", "new-note")}</div><p class="ev-intro">${chatId ? "Pages saved for this roleplay chat." : "Your personal pages are available here, even when no roleplay chat is open."} Keep promises, lore, ideas and details you want to remember. Your pages save as you write.</p>${notes || `<div class="ev-empty"><div class="ev-empty-mark">✎</div><p>A fresh page, just for you.</p><span class="ev-muted">Create your first note whenever you're ready.</span></div>`}`;
   }
   function noteEditor() {
     const n = editingNote;
     const draft = n.draft || n;
     const html = sanitizeNoteHtml(draft.bodyHtml || plainToHtml(draft.body || ""));
+    const initialFontSize = /^\d{1,2}px$/.test(String(draft.fontSize || n.fontSize || "")) ? (draft.fontSize || n.fontSize) : "14px";
     return `<div class="ev-kicker">Notebook · ${n.id.startsWith("note-") ? "New page" : "Edit page"}</div><div class="ev-row"><h2 class="ev-page-title">A page of your own</h2>${button(editorExpanded ? "↙ Restore" : "⤢ Expand", "expand-editor", "ev-btn-ghost")}</div>
       <label class="ev-label" for="ev-note-title">Page title</label><input id="ev-note-title" class="ev-input" maxlength="140" placeholder="Give this memory a name…" value="${esc(draft.title || "")}"/>
       <div class="ev-label">Your note</div>
       <div class="ev-editor-shell"><div class="ev-toolbar" aria-label="Text formatting">
         <button type="button" class="ev-tool" data-format="bold" title="Bold"><b>B</b></button><button type="button" class="ev-tool" data-format="italic" title="Italic"><i>I</i></button><button type="button" class="ev-tool" data-format="underline" title="Underline"><u>U</u></button><button type="button" class="ev-tool" data-format="removeFormat" title="Clear formatting">Tx</button>
         <select id="ev-block-style" class="ev-tool-select" aria-label="Text style"><option value="p">Paragraph</option><option value="h2">Heading</option><option value="h3">Subheading</option><option value="blockquote">Quote</option></select>
-        <select id="ev-font-size" class="ev-tool-select" aria-label="Text size"><option value="12px">12 px</option><option value="14px" selected>14 px</option><option value="16px">16 px</option><option value="18px">18 px</option><option value="20px">20 px</option><option value="24px">24 px</option><option value="28px">28 px</option><option value="32px">32 px</option></select>
+        <select id="ev-font-size" class="ev-tool-select" aria-label="Text size"><option value="12px" ${initialFontSize === "12px" ? "selected" : ""}>12 px</option><option value="14px" ${initialFontSize === "14px" ? "selected" : ""}>14 px</option><option value="16px" ${initialFontSize === "16px" ? "selected" : ""}>16 px</option><option value="18px" ${initialFontSize === "18px" ? "selected" : ""}>18 px</option><option value="20px" ${initialFontSize === "20px" ? "selected" : ""}>20 px</option><option value="24px" ${initialFontSize === "24px" ? "selected" : ""}>24 px</option><option value="28px" ${initialFontSize === "28px" ? "selected" : ""}>28 px</option><option value="32px" ${initialFontSize === "32px" ? "selected" : ""}>32 px</option></select>
         <label class="ev-toolbar-label" for="ev-text-colour">Text</label><input id="ev-text-colour" class="ev-colour" type="color" value="#604477" aria-label="Text colour"/>
         <label class="ev-toolbar-label" for="ev-highlight-colour">Highlight</label><input id="ev-highlight-colour" class="ev-colour" type="color" value="#f4d8ef" aria-label="Highlight colour"/>
         <button type="button" class="ev-tool" data-format="insertUnorderedList" title="Bullet list">• List</button><button type="button" class="ev-tool" data-format="insertOrderedList" title="Numbered list">1. List</button>
         <button type="button" class="ev-tool" data-action="add-image" title="Insert photo">▧ Photo</button>
       </div>
-      <div id="ev-note-body" class="ev-rich-editor" contenteditable="true" role="textbox" aria-multiline="true" data-placeholder="Write the little details you want to keep…">${html}</div>
+      <div class="ev-rich-editor-wrap" style="height:${editorHeight}px"><div id="ev-note-body" class="ev-rich-editor" style="font-size:${initialFontSize}" contenteditable="true" role="textbox" aria-multiline="true" data-placeholder="Write the little details you want to keep…">${html}</div><div class="ev-editor-resize-grip" role="button" tabindex="0" aria-label="Drag to make the writing box taller or shorter" title="Drag to resize writing area">◢</div></div>
       <div class="ev-editor-sizebar"><span>Writing area · drag the lower corner or adjust its height</span><div>${button("−", "editor-smaller", "ev-btn-ghost")}${button("＋", "editor-larger", "ev-btn-ghost")}</div></div></div>
       <input id="ev-image-file" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden />
       <div class="ev-editor-footer">${button("Close", "cancel-note", "ev-btn-ghost")}${button("Save page", "save-note")}</div><div class="ev-inline-label" style="margin-top:7px">Formatting, photos and text are saved automatically while you write.</div>`;
@@ -354,7 +440,7 @@ export function setup(ctx) {
       <article class="ev-card"><h3 class="ev-card-title">Current archive</h3><p class="ev-muted">${chatId ? `This journal is storing notes and captured messages for <strong>${esc(chatName || "the current chat")}</strong>.` : "Your personal notebook is available from the home screen. Scene archives are kept separately inside each roleplay chat."}</p><div class="ev-rule"></div><div class="ev-row"><span class="ev-muted">Captured messages</span><strong>${(archive.messages || []).length}</strong></div><div class="ev-row" style="margin-top:8px"><span class="ev-muted">Saved scenes</span><strong>${(archive.scenes || []).length}</strong></div><div class="ev-row" style="margin-top:8px"><span class="ev-muted">Notebook pages</span><strong>${(archive.notes || []).length}</strong></div></article>
       <article class="ev-card ev-card-soft"><h3 class="ev-card-title">Manual notes</h3><p class="ev-muted">Use headings, text sizes, colours, highlights, lists, quotes and imported photos. Expand the editor or resize its writing area while editing.</p></article>
       <article class="ev-card ev-card-soft"><h3 class="ev-card-title">Privacy & accuracy</h3><p class="ev-muted">Captured messages and notes stay in Lumiverse's private extension storage. Recording a scene sends the recent excerpt to the connection you choose. AI-generated summaries are drafts, not automatically verified canon.</p></article>
-      <article class="ev-card ev-card-soft"><h3 class="ev-card-title">About this build</h3><p class="ev-muted">Evermore 0.3.1 preview. Automatic message capture and manual scene recording are included. Automatic scene-boundary detection, shared cross-chat character profiles and archive export are not included yet.</p></article>`;
+      <article class="ev-card ev-card-soft"><h3 class="ev-card-title">About this build</h3><p class="ev-muted">Evermore 0.3.2 preview. Automatic message capture and manual scene recording are included. Automatic scene-boundary detection, shared cross-chat character profiles and archive export are not included yet.</p></article>`;
   }
 
   async function refreshConnections() {
@@ -400,7 +486,7 @@ export function setup(ctx) {
   async function handleAction(action, element) {
     if (action === "close") { closeJournal(); return; }
     if (action === "new-note") {
-      editingNote = { id: `note-${Date.now()}`, title: "", body: "", bodyHtml: "" }; noteDraftCache = null; activeTab = "notes"; editorExpanded = false; render(); return;
+      editingNote = { id: `note-${Date.now()}`, title: "", body: "", bodyHtml: "", fontSize: "14px" }; noteDraftCache = null; activeTab = "notes"; editorExpanded = false; render(); return;
     }
     if (action.startsWith("edit:")) {
       const note = archive.notes.find(n => n.id === action.slice(5));
@@ -415,7 +501,7 @@ export function setup(ctx) {
       if (!editingNote) return;
       clearTimeout(autosaveTimer); stashDraftFromEditor();
       const draft = editingNote.draft || editingNote;
-      request("evermore:save-note", { note: { id: editingNote.id, title: draft.title?.trim() || "Untitled note", body: draft.body || "", bodyHtml: draft.bodyHtml || "" } });
+      request("evermore:save-note", { note: { id: editingNote.id, title: draft.title?.trim() || "Untitled note", body: draft.body || "", bodyHtml: draft.bodyHtml || "", fontSize: draft.fontSize || "14px" } });
       say("Saving your page…"); editingNote = null; noteDraftCache = null; editorExpanded = false; return;
     }
     if (action.startsWith("delete-note:")) {
@@ -427,9 +513,9 @@ export function setup(ctx) {
       if (id && window.confirm("Delete this scene record?")) request("evermore:delete-scene", { sceneId: id }); return;
     }
     if (action === "analyse") {
-      if (!chatId || busy) return;
+      if (busy) return;
       if (connectionMode === "separate" && !selectedConnectionId) { say("Choose a connection profile in Settings first."); return; }
-      busy = true; say("Reading the recent story…"); render();
+      busy = true; say("Checking the open chat and reading its recent messages…"); render();
       request("evermore:analyse", { mode: connectionMode, connectionId: selectedConnectionId }); return;
     }
     if (action === "add-image") {
@@ -440,7 +526,7 @@ export function setup(ctx) {
     }
     if (action === "editor-larger" || action === "editor-smaller") {
       editorHeight = Math.max(220, Math.min(900, editorHeight + (action === "editor-larger" ? 100 : -100)));
-      const editor = root.querySelector("#ev-note-body"); if (editor) editor.style.height = `${editorHeight}px`;
+      const wrap = root.querySelector(".ev-rich-editor-wrap"); if (wrap) wrap.style.height = `${editorHeight}px`;
       return;
     }
   }
@@ -511,6 +597,7 @@ export function setup(ctx) {
   }
 
   root.addEventListener("change", handleChange);
+  document.addEventListener("selectionchange", rememberSelection);
   const unsubscribe = ctx.onBackendMessage(payload => {
     if (!payload?.type?.startsWith("evermore:")) return;
     if (payload.type === "evermore:active-chat") {
@@ -526,6 +613,7 @@ export function setup(ctx) {
       if (expanded) render();
     } else if (payload.type === "evermore:archive") {
       archive = payload.archive || archive; busy = false;
+      if (payload.action === "analyse" && payload.chatId) { chatId = payload.chatId; chatName = archive.chatName || chatName; }
       if (expanded && !editingNote) render();
       else if (expanded) say("Page saved.");
     } else if (payload.type === "evermore:note-saved") {
@@ -560,6 +648,8 @@ export function setup(ctx) {
     clearTimeout(autosaveTimer);
     unsubscribe?.(); unsubscribeConnection?.();
     root.removeEventListener("change", handleChange);
+    document.removeEventListener("selectionchange", rememberSelection);
+    stopPanelResize(); stopEditorResize();
     window.visualViewport?.removeEventListener("resize", onViewportResize);
     widget.destroy();
   };
