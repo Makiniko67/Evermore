@@ -232,10 +232,10 @@ spindle.onFrontendMessage(async (payload, userId) => {
           if (!payload.connectionId) throw new Error("Choose a saved Lumiverse connection in Evermore Settings first.");
           const profile = await spindle.connections?.get?.(payload.connectionId, userId);
           if (spindle.connections?.get && !profile) throw new Error("That saved connection could not be found. Choose another connection in Settings.");
-          result = await spindle.generate.raw({ connection_id: payload.connectionId, messages: [{ role: "user", content: prompt }], parameters: { temperature: 0.2, max_tokens: 1600 } });
+          result = await spindle.generate.raw({ connection_id: payload.connectionId, messages: [{ role: "user", content: prompt }], parameters: { temperature: 0.2, max_tokens: 1600 }, userId });
         } else {
           // quiet() is Lumiverse's documented route to the currently active profile.
-          result = await spindle.generate.quiet({ messages: [{ role: "user", content: prompt }], parameters: { temperature: 0.2, max_tokens: 1600 } });
+          result = await spindle.generate.quiet({ messages: [{ role: "user", content: prompt }], parameters: { temperature: 0.2, max_tokens: 1600 }, userId });
         }
       } catch (generationError) {
         throw new Error(`AI generation failed: ${generationError?.message || generationError}`);
