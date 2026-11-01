@@ -1,4 +1,4 @@
-// Evermore 0.3.3 — Lumiverse Spindle backend
+// Evermore 0.4.0 — scene notifications, editable scene records and cast continuity
 // Operator-scoped user routing, per-user archives, and rich-note image uploads.
 
 const PREFIX = "evermore/chats/";
@@ -52,6 +52,88 @@ function reply(userId, payload) {
   }
   spindle.sendToFrontend(payload, userId);
 }
+
+function asTextArray(value) {
+  return Array.isArray(value) ? value.map(textOf).map(x => x.trim()).filter(Boolean) : [];
+}
+function normalizeSceneCast(rawCast, fallbackNames = []) {
+  const source = Array.isArray(rawCast) && rawCast.length ? rawCast : asTextArray(fallbackNames).map(name => ({ name }));
+  const seen = new Set();
+  return source.map(item => {
+    const row = typeof item === "string" ? { name: item } : (item || {});
+    const name = textOf(row.name || row.character || "").trim().slice(0, 120);
+    const key = name.toLocaleLowerCase();
+    if (!name || seen.has(key)) return null;
+    seen.add(key);
+    return {
+      name,
+      position: textOf(row.position || row.standing || "").trim().slice(0, 240),
+      introducedHere: row.introducedHere === true || row.introduced === true,
+      introduction: textOf(row.introduction || row.introductionContext || "").trim().slice(0, 700),
+      notes: textOf(row.notes || "").trim().slice(0, 700)
+    };
+  }).filter(Boolean).slice(0, 80);
+}
+function rebuildCharacterIndex(archive) {
+  const profiles = new Map();
+  const scenes = [...(archive.scenes || [])].sort((a, b) => Number(a.createdAt || 0) - Number(b.createdAt || 0));
+  for (const scene of scenes) {
+    const cast = normalizeSceneCast(scene.cast, scene.characters);
+    scene.cast = cast;
+    scene.characters = cast.map(row => row.name);
+    for (const member of cast) {
+      const key = member.name.toLocaleLowerCase();
+      let profile = profiles.get(key);
+      if (!profile) {
+        profile = { name: member.name, firstSeenAt: Number(scene.createdAt || Date.now()), introducedAt: null, introducedInSceneId: "", introducedInSceneTitle: "", introductionContext: "", appearances: [] };
+        profiles.set(key, profile);
+      }
+      const at = Number(scene.createdAt || Date.now());
+      profile.firstSeenAt = Math.min(Number(profile.firstSeenAt || at), at);
+      profile.appearances.push({
+        sceneId: textOf(scene.id), sceneTitle: textOf(scene.title || "Untitled scene"), at,
+        location: textOf(scene.location || "Unspecified location"), position: member.position,
+        introducedHere: member.introducedHere, introduction: member.introduction, notes: member.notes
+      });
+      if (member.introducedHere && (profile.introducedAt == null || at < profile.introducedAt)) {
+        profile.introducedAt = at;
+        profile.introducedInSceneId = textOf(scene.id);
+        profile.introducedInSceneTitle = textOf(scene.title || "Untitled scene");
+        profile.introductionContext = member.introduction;
+      }
+    }
+  }
+  archive.characters = Array.from(profiles.values()).map(profile => ({
+    ...profile,
+    appearanceCount: profile.appearances.length,
+    appearances: profile.appearances.sort((a, b) => b.at - a.at)
+  })).sort((a, b) => a.name.localeCompare(b.name));
+}
+function toastScene(kind, message, title) {
+  try { spindle.toast?.[kind]?.(message, { title, duration: kind === "error" ? 9000 : 6000 }); }
+  catch (error) { spindle.log.warn(`[Evermore] toast notification failed: ${error?.message || error}`); }
+}
+async function pushSceneNotification(userId, chatId, title, body, tag) {
+  try {
+    if (!spindle.permissions?.has?.("push_notification") || !spindle.push?.getStatus || !spindle.push?.send) return;
+    const status = await spindle.push.getStatus(userId);
+    if (!status?.available) return;
+    await spindle.push.send({ title, body, tag, url: chatId ? `/chat/${encodeURIComponent(chatId)}` : "/" }, userId);
+  } catch (error) {
+    // Push is optional; toast notifications and scene recording must keep working
+    // when the user has not enabled push or a device subscription is unavailable.
+    spindle.log.warn(`[Evermore] optional push notification failed: ${error?.message || error}`);
+  }
+}
+function notifySceneStarted() {
+  toastScene("info", "Evermore is preparing your scene record. You can keep writing while it works.", "Preparing scene");
+}
+function notifySceneFinished(userId, chatId, scene) {
+  const title = textOf(scene?.title || "Your scene").slice(0, 90);
+  toastScene("success", `“${title}” has been saved to your scene archive.`, "Scene record complete");
+  void pushSceneNotification(userId, chatId, "Scene record complete", `“${title}” has been saved to Evermore.`, `evermore-scene-${cleanId(chatId)}-complete`);
+}
+
 function normalizeMessage(message, chatId) {
   const m = message || {};
   const raw = m.content ?? m.text ?? m.mes ?? "";
@@ -202,11 +284,36 @@ spindle.onFrontendMessage(async (payload, userId) => {
     }
     if (type === "evermore:delete-scene") {
       archive.scenes = archive.scenes.filter(s => s.id !== payload.sceneId);
+      rebuildCharacterIndex(archive);
       await saveArchive(archive, userId);
-      reply(userId, { type: "evermore:archive", requestId, archive });
+      reply(userId, { type: "evermore:archive", requestId, archive, action: "delete-scene" });
+      return;
+    }
+    if (type === "evermore:save-scene") {
+      const draft = payload.scene || {};
+      const index = archive.scenes.findIndex(s => s.id === String(draft.id || ""));
+      if (index < 0) throw new Error("That scene record could not be found. Refresh the archive and try again.");
+      const previous = archive.scenes[index];
+      const cast = normalizeSceneCast(draft.cast, draft.characters);
+      const updated = {
+        ...previous,
+        title: textOf(draft.title || "Untitled scene").trim().slice(0, 180),
+        location: textOf(draft.location || "Unspecified location").trim().slice(0, 240),
+        summary: textOf(draft.summary || "").slice(0, 12000),
+        characters: cast.map(row => row.name), cast,
+        events: asTextArray(draft.events), importantDialogue: asTextArray(draft.importantDialogue),
+        emotions: asTextArray(draft.emotions), relationshipChanges: asTextArray(draft.relationshipChanges),
+        continuity: asTextArray(draft.continuity), unresolved: asTextArray(draft.unresolved),
+        editedAt: Date.now()
+      };
+      archive.scenes[index] = updated;
+      rebuildCharacterIndex(archive);
+      await saveArchive(archive, userId);
+      reply(userId, { type: "evermore:archive", requestId, archive, action: "save-scene" });
       return;
     }
     if (type === "evermore:analyse") {
+      notifySceneStarted();
       // Resolve the active chat at click time. A floating widget can remain
       // mounted while the user switches roleplay chats, so its cached chatId
       // must never decide which conversation is recorded.
@@ -214,6 +321,7 @@ spindle.onFrontendMessage(async (payload, userId) => {
       const targetChatId = activeChat?.id || null;
       if (!targetChatId) throw new Error("No active roleplay chat was found. Open the conversation first, then try Record recent scene again.");
       const targetChatName = activeChat?.name || payload.chatName || "";
+      void pushSceneNotification(userId, targetChatId, "Preparing scene", "Evermore is preparing a scene record from your recent roleplay messages.", `evermore-scene-${cleanId(targetChatId)}-started`);
       const sceneArchive = await loadArchive(targetChatId, targetChatName, userId);
       const recent = (await syncChatMessages(targetChatId, sceneArchive, userId)).slice(-30);
       if (!recent.length) throw new Error("No readable roleplay messages were found in this chat. Send a few messages and try again.");
@@ -221,7 +329,8 @@ spindle.onFrontendMessage(async (payload, userId) => {
       const prompt = [
         "You are Evermore, a careful roleplay archivist. Create a faithful scene record from this excerpt.",
         "Return one valid JSON object only, with no markdown fences or commentary.",
-        "Use these keys: title (string), location (string), characters (array of names), summary (string), events (array of strings), importantDialogue (array of strings), emotions (array of strings), relationshipChanges (array of strings), continuity (array of strings), unresolved (array of strings).",
+        "Use these keys: title (string), location (string), characters (array of names), cast (array of objects with name, position, introducedHere boolean, introduction string, notes string), summary (string), events (array of strings), importantDialogue (array of strings), emotions (array of strings), relationshipChanges (array of strings), continuity (array of strings), unresolved (array of strings).",
+        "For cast, include each character who is actually present in this excerpt. Record their explicit physical position or activity in position (for example, beside the doorway, seated at the table, across from Mira); use an empty string if not stated. introducedHere is true only when this excerpt explicitly shows the character being introduced to the story or other characters for the first time. If unsure, use false. Put a concise, text-supported explanation of that introduction in introduction. Do not infer a character's first-ever appearance from a mere name mention. Scene location is the overall place; position is each character's place within it.",
         "Do not invent facts or silently convert guesses into canon. Put uncertain details under continuity prefixed with 'Possible inference:'. Keep summary concise. Use empty strings or arrays when unknown.",
         JSON.stringify(recent.map(m => ({ role: m.role, name: m.name, content: m.content })))
       ].join("\n\n");
@@ -254,25 +363,26 @@ spindle.onFrontendMessage(async (payload, userId) => {
       } catch (parseError) {
         throw new Error(`The AI replied, but its scene record was not valid JSON. Try again or choose another connection. (${parseError?.message || "parse error"})`);
       }
-      const asTextArray = value => Array.isArray(value) ? value.map(textOf).filter(Boolean) : [];
+      const cast = normalizeSceneCast(parsed.cast, parsed.characters);
       const scene = {
         id: `scene-${Date.now()}`, title: textOf(parsed.title || "Untitled scene"), location: textOf(parsed.location || "Unspecified location"),
-        characters: asTextArray(parsed.characters), summary: textOf(parsed.summary),
+        characters: cast.map(row => row.name), cast, summary: textOf(parsed.summary),
         events: asTextArray(parsed.events), importantDialogue: asTextArray(parsed.importantDialogue),
         emotions: asTextArray(parsed.emotions), relationshipChanges: asTextArray(parsed.relationshipChanges),
         continuity: asTextArray(parsed.continuity), unresolved: asTextArray(parsed.unresolved),
         createdAt: Date.now(), messageCount: recent.length, sourceMessageIds: recent.map(m => m.id)
       };
       sceneArchive.scenes.unshift(scene);
-      const known = new Set(sceneArchive.characters.map(c => textOf(c.name).toLowerCase()));
-      for (const name of scene.characters) if (name && !known.has(name.toLowerCase())) sceneArchive.characters.push({ name, firstSeenAt: Date.now(), appearances: 1 });
+      rebuildCharacterIndex(sceneArchive);
       await saveArchive(sceneArchive, userId);
       reply(userId, { type: "evermore:archive", requestId, chatId: targetChatId, archive: sceneArchive, action: "analyse" });
+      notifySceneFinished(userId, targetChatId, scene);
       return;
     }
   } catch (error) {
+    if (type === "evermore:analyse") toastScene("error", error?.message || String(error), "Scene recording failed");
     reply(userId, { type: "evermore:error", requestId, error: error?.message || String(error) });
   }
 });
 
-spindle.log.info("[Evermore] Story Journal 0.3.3 ready");
+spindle.log.info("[Evermore] Story Journal 0.4.0 ready");
