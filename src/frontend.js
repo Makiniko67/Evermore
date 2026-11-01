@@ -1,4 +1,4 @@
-// Evermore 0.3.2 — responsive dark-lavender story journal with rich manual notes.
+// Evermore 0.3.4 — responsive dark-lavender story journal with rich manual notes.
 export function setup(ctx) {
   const widget = ctx.ui.createFloatWidget({
     width: 60, height: 60, initialPosition: { x: 18, y: 170 },
@@ -440,7 +440,7 @@ export function setup(ctx) {
       <article class="ev-card"><h3 class="ev-card-title">Current archive</h3><p class="ev-muted">${chatId ? `This journal is storing notes and captured messages for <strong>${esc(chatName || "the current chat")}</strong>.` : "Your personal notebook is available from the home screen. Scene archives are kept separately inside each roleplay chat."}</p><div class="ev-rule"></div><div class="ev-row"><span class="ev-muted">Captured messages</span><strong>${(archive.messages || []).length}</strong></div><div class="ev-row" style="margin-top:8px"><span class="ev-muted">Saved scenes</span><strong>${(archive.scenes || []).length}</strong></div><div class="ev-row" style="margin-top:8px"><span class="ev-muted">Notebook pages</span><strong>${(archive.notes || []).length}</strong></div></article>
       <article class="ev-card ev-card-soft"><h3 class="ev-card-title">Manual notes</h3><p class="ev-muted">Use headings, text sizes, colours, highlights, lists, quotes and imported photos. Expand the editor or resize its writing area while editing.</p></article>
       <article class="ev-card ev-card-soft"><h3 class="ev-card-title">Privacy & accuracy</h3><p class="ev-muted">Captured messages and notes stay in Lumiverse's private extension storage. Recording a scene sends the recent excerpt to the connection you choose. AI-generated summaries are drafts, not automatically verified canon.</p></article>
-      <article class="ev-card ev-card-soft"><h3 class="ev-card-title">About this build</h3><p class="ev-muted">Evermore 0.3.2 preview. Automatic message capture and manual scene recording are included. Automatic scene-boundary detection, shared cross-chat character profiles and archive export are not included yet.</p></article>`;
+      <article class="ev-card ev-card-soft"><h3 class="ev-card-title">About this build</h3><p class="ev-muted">Evermore 0.3.4 preview. Automatic message capture and manual scene recording are included. Automatic scene-boundary detection, shared cross-chat character profiles and archive export are not included yet.</p></article>`;
   }
 
   async function refreshConnections() {
